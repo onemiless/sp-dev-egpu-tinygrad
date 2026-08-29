@@ -397,7 +397,7 @@ class AMDComputeQueue(HWQueue):
     self.binded_device = dev
     self.hw_page = dev.allocator.alloc(len(self._q) * 4, BufferSpec(cpu_access=True, nolru=True, uncached=True))
     hw_view = self.hw_page.cpu_view().view(fmt='I')
-    for i, value in enumerate(self._q): hw_view[i] = value
+    hw_view[:len(self._q)] = array.array('I', self._q)
 
     self.indirect_cmd = [self.pm4.PACKET3(self.pm4.PACKET3_INDIRECT_BUFFER, 2), *data64_le(self.hw_page.va_addr),
                          len(self._q) | self.pm4.INDIRECT_BUFFER_VALID]

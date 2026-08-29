@@ -120,11 +120,33 @@ class AMFirmware:
 class AMPageTableEntry:
   def __init__(self, adev, paddr, lv): self.adev, self.paddr, self.lv, self.entries = adev, paddr, lv, adev.vram.view(paddr, 0x1000, fmt='Q')
 
-  def set_entry(self, entry_id:int, paddr:int, table=False, uncached=False, aspace=AddrSpace.PHYS, snooped=False, frag=0, valid=True):
+  def _entry_value(self, paddr:int, table=False, uncached=False, aspace=AddrSpace.PHYS, snooped=False, frag=0, valid=True) -> int:
     is_sys = aspace is AddrSpace.SYS
     if aspace is AddrSpace.PHYS: paddr = self.adev.paddr2xgmi(paddr)
     assert paddr & self.adev.gmc.address_space_mask == paddr, f"Invalid physical address {paddr:#x}"
-    self.entries[entry_id] = self.adev.gmc.get_pte_flags(self.lv, table, frag, uncached, is_sys, snooped, valid) | (paddr & 0x0000FFFFFFFFF000)
+    return self.adev.gmc.get_pte_flags(self.lv, table, frag, uncached, is_sys, snooped, valid) | (paddr & 0x0000FFFFFFFFF000)
+
+  def set_entry(self, entry_id:int, paddr:int, table=False, uncached=False, aspace=AddrSpace.PHYS, snooped=False, frag=0, valid=True):
+    self.entries[entry_id] = self._entry_value(paddr, table, uncached, aspace, snooped, frag, valid)
+
+  def set_entries(self, entry_id:int, paddrs, table=False, uncached=False, aspace=AddrSpace.PHYS, snooped=False, frag=0, valid=True):
+    values = array.array('Q', (self._entry_value(paddr, table, uncached, aspace, snooped, frag, valid) for paddr in paddrs))
+    self.entries[entry_id:entry_id+len(values)] = values
+
+  def _valid_values(self, entry_id:int, count:int):
+    if count == 1: return (self.entries[entry_id],)
+    values = self.entries[entry_id:entry_id+count]
+    if isinstance(values, (bytes, bytearray, memoryview)):
+      decoded = array.array('Q')
+      decoded.frombytes(values)
+      values = decoded
+    return values
+
+  def any_valid(self, entry_id:int, count:int) -> bool:
+    return any(value & am.AMDGPU_PTE_VALID for value in self._valid_values(entry_id, count))
+
+  def all_valid(self, entry_id:int, count:int) -> bool:
+    return all(value & am.AMDGPU_PTE_VALID for value in self._valid_values(entry_id, count))
 
   def entry(self, entry_id:int) -> int: return self.entries[entry_id]
   def valid(self, entry_id:int) -> bool: return (self.entries[entry_id] & am.AMDGPU_PTE_VALID) != 0

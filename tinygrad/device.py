@@ -112,7 +112,13 @@ class Buffer:
       if opaque is not None: self.allocate(opaque)
       if initial_value is not None:
         self.allocate()
-        self.copy_from(Buffer("PYTHON", self.size, self.dtype, opaque=memoryview(bytearray(initial_value))))
+        # USB AMD copyin consumes the host view into its persistent libusb/SRAM staging buffer
+        # before returning. Avoid cloning multi-gigabyte OOB pickle buffers a second time on
+        # memory-constrained devices; other backends retain the conservative owned bytearray.
+        zero_copy_pickle = isinstance(initial_value, pickle.PickleBuffer) and \
+          hasattr(self.allocator, "dev") and getattr(self.allocator.dev, "is_usb", lambda: False)()
+        source = initial_value.raw() if zero_copy_pickle else memoryview(bytearray(initial_value))
+        self.copy_from(Buffer("PYTHON", self.size, self.dtype, opaque=source))
         if isinstance(initial_value, pickle.PickleBuffer): initial_value.release()
     else:
       assert base._base is None, "base can't have a base"

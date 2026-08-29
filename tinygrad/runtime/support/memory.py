@@ -203,14 +203,22 @@ class MemoryManager:
 
     ctx = PageTableTraverseContext(self.dev, self.root_page_table, vaddr, boot=boot, inspect=True)
     for _, pt, pte_idx, pte_cnt, _ in ctx.next(size):
-      for pte_off in range(pte_cnt): assert not pt.valid(pte_idx + pte_off), f"PTE already mapped: {pt.entry(pte_idx + pte_off):#x}"
+      if hasattr(pt, "any_valid"):
+        assert not pt.any_valid(pte_idx, pte_cnt), f"PTE range already mapped: {pte_idx=} {pte_cnt=}"
+      else:
+        for pte_off in range(pte_cnt): assert not pt.valid(pte_idx + pte_off), f"PTE already mapped: {pt.entry(pte_idx + pte_off):#x}"
 
     ctx = PageTableTraverseContext(self.dev, self.root_page_table, vaddr, create_pts=True, boot=boot)
     for paddr, psize in paddrs:
       for off, pt, pte_idx, pte_cnt, pte_covers in ctx.next(psize, paddr=paddr):
-        for pte_off in range(pte_cnt):
-          pt.set_entry(pte_idx + pte_off, paddr + off + pte_off * pte_covers, uncached=uncached, aspace=aspace, snooped=snooped,
-                       frag=self._frag_size(ctx.vaddr+off, pte_cnt * pte_covers), valid=True)
+        frag = self._frag_size(ctx.vaddr+off, pte_cnt * pte_covers)
+        if hasattr(pt, "set_entries"):
+          pt.set_entries(pte_idx, (paddr + off + pte_off * pte_covers for pte_off in range(pte_cnt)),
+                         uncached=uncached, aspace=aspace, snooped=snooped, frag=frag, valid=True)
+        else:
+          for pte_off in range(pte_cnt):
+            pt.set_entry(pte_idx + pte_off, paddr + off + pte_off * pte_covers, uncached=uncached, aspace=aspace, snooped=snooped,
+                         frag=frag, valid=True)
 
     self.on_range_mapped()
     return VirtMapping(vaddr, size, paddrs, aspace=aspace, uncached=uncached, snooped=snooped)
@@ -220,9 +228,13 @@ class MemoryManager:
 
     ctx = PageTableTraverseContext(self.dev, self.root_page_table, vaddr, free_pts=True)
     for _, pt, pte_idx, pte_cnt, _ in ctx.next(size):
-      for pte_id in range(pte_idx, pte_idx + pte_cnt):
-        assert pt.valid(pte_id), f"PTE not mapped: {pt.entry(pte_id):#x}"
-        pt.set_entry(pte_id, paddr=0x0, valid=False)
+      if hasattr(pt, "all_valid") and hasattr(pt, "set_entries"):
+        assert pt.all_valid(pte_idx, pte_cnt), f"PTE range not mapped: {pte_idx=} {pte_cnt=}"
+        pt.set_entries(pte_idx, (0 for _ in range(pte_cnt)), valid=False)
+      else:
+        for pte_id in range(pte_idx, pte_idx + pte_cnt):
+          assert pt.valid(pte_id), f"PTE not mapped: {pt.entry(pte_id):#x}"
+          pt.set_entry(pte_id, paddr=0x0, valid=False)
 
   def on_range_mapped(self): pass
 
