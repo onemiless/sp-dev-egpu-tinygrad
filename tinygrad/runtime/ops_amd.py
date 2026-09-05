@@ -416,7 +416,15 @@ class AMDComputeQueue(HWQueue):
       cmds = [self.pm4.PACKET3(self.pm4.PACKET3_INDIRECT_BUFFER, 2), *data64_le(ib_ptr), len(cmds) | self.pm4.INDIRECT_BUFFER_VALID,
               self.pm4.PACKET3(self.pm4.PACKET3_NOP, ib_pad + len(cmds) - 1), *((0,) * ib_pad), *cmds]
 
-    for i, value in enumerate(cmds): dev.compute_queue.ring[(dev.compute_queue.put_value + i) % len(dev.compute_queue.ring)] = value
+    if dev.is_usb():
+      # Batch adjacent dwords into one USB transfer, splitting only when the ring wraps.
+      ring_pos, copied = dev.compute_queue.put_value % len(dev.compute_queue.ring), 0
+      while copied < len(cmds):
+        count = min(len(cmds) - copied, len(dev.compute_queue.ring) - ring_pos)
+        dev.compute_queue.ring[ring_pos:ring_pos+count] = array.array('I', (cmds[i] for i in range(copied, copied+count)))
+        copied, ring_pos = copied + count, 0
+    else:
+      for i, value in enumerate(cmds): dev.compute_queue.ring[(dev.compute_queue.put_value + i) % len(dev.compute_queue.ring)] = value
 
     dev.compute_queue.put_value += len(cmds)
     dev.compute_queue.signal_doorbell(dev)
@@ -689,16 +697,19 @@ class AMDAllocator(HCQAllocator['AMDDevice']):
     inflight = [None, None]
     for c in range(nchunks):
       seq, size = self._usb_seq + c, min(CHUNK, src.nbytes - c * CHUNK)
-      if inflight[seq & 1] is not None: usb.usb.bulk_wait(inflight[seq & 1])
+      previous_tag = inflight[seq & 1]
+      if previous_tag is not None: usb.usb.bulk_wait(previous_tag)
       buf = self._usb_stage[seq & 1][1]
       buf[:size] = src_mv[c * CHUNK : c * CHUNK + size]
       wire = round_up(size + 4, 512)  # payload plus the sentinel, padded to 512B sectors (full window for max chunks)
       struct.pack_into('<I', buf, wire - 4, 0x51000000 | (seq & 0xFFFFFF))  # the sentinel is the last dword of the wire
       arm_tag = usb.usb.control_write_async(0xF2, wire // 512, (seq & 1) * 16 | (ceildiv(wire, 0x4000) << 8))  # wValue=sectors, wIndex=slot|count
-      rd_tag, rd_mv = usb.usb.control_read_async(0xE4, 8, value=FENCE)  # arm and fence read fly in one round-trip window
+      if previous_tag is not None:
+        rd_tag, rd_mv = usb.usb.control_read_async(0xE4, 8, value=FENCE)  # arm and fence read fly in one round-trip window
       usb.usb.bulk_wait(arm_tag)
-      usb.usb.bulk_wait(rd_tag)
-      if int.from_bytes(rd_mv, 'little') < seq - 1: wait_drain(seq - 1)  # rare: the drain lagged; spin on fresh reads
+      if previous_tag is not None:
+        usb.usb.bulk_wait(rd_tag)
+        if int.from_bytes(rd_mv, 'little') < seq - 1: wait_drain(seq - 1)  # rare: the drain lagged; spin on fresh reads
       inflight[seq & 1] = usb.usb.bulk_write_async(buf[:wire])
     for tag in inflight: usb.usb.bulk_wait(tag)
     self._usb_seq += nchunks
